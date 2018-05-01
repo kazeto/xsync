@@ -1,7 +1,7 @@
 #! /usr/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, subprocess, argparse, re, collections
+import os, subprocess, argparse, re, collections, logging
 from functools import partial
 
 DESCRIPTION = 'Syncs directory in local-machine and remote-servers.'
@@ -10,10 +10,10 @@ parser = argparse.ArgumentParser(description=DESCRIPTION)
 parser.add_argument('src', action='store', nargs=1, type=str, help='Directory to sync in local machine.')
 parser.add_argument('dests', action='store', nargs='+', type=str, help='Directories to sync in remote machines.')
 parser.add_argument('--dry-run', action='store_true', help='Activates dry-run option of rsync.')
+parser.add_argument('--no-color', action='store_true', help='Disables ANSI color sequences in logs.')
 parser.add_argument('--coding', action='store', type=str, default='utf-8', help='Coding system of your prompt.')
 opts = parser.parse_args()
 
-is_local = lambda host: (host == 'local')
 
 def ansi_color(code, text, is_bold=False):
     if is_bold:
@@ -28,6 +28,28 @@ ansi_pink   = partial(ansi_color, '35')
 ansi_cyan   = partial(ansi_color, '36')
 ansi_silver = partial(ansi_color, '37')
 ansi_gray   = partial(ansi_color, '90')
+
+
+def make_logger(level):
+    global opts
+
+    if opts.no_color:
+        fmt = '[%(name)s] %(levelname)s: %(message)s'
+    else:
+        fmt = ansi_pink('[%(name)s] ') + ansi_cyan('%(levelname)s: %(message)s')
+    
+    _sh = logging.StreamHandler()
+    _sh.setFormatter(logging.Formatter(fmt))
+
+    logger = logging.getLogger(__name__)
+    logger.addHandler(_sh)
+    logger.setLevel(level)
+    return logger
+
+logger = make_logger(logging.DEBUG)
+
+
+is_local = lambda host: (host == 'local')
 
 
 ## Target of sync.
@@ -59,8 +81,11 @@ class Target:
 ## @return String returned by the command.
 def run_command(cmd, dry_run = False):
     global opts
-    
-    print('> ' + cmd)
+
+    if dry_run:
+        logger.info('run(dry): %s' % cmd)
+    else:
+        logger.info('run: %s' % cmd)
     
     if dry_run:
         return ''
@@ -83,6 +108,8 @@ def find_files(target, name):
 
 ## Reads configuration file at given path.
 def read_syncconf(path = '.sync.conf'):
+    logger.info('read syncconf at "%s"' % path)
+    
     set_only   = set()
     set_ignore = set()
     
@@ -100,8 +127,12 @@ def read_syncconf(path = '.sync.conf'):
                 host, snipet = spl[1].split(':', 1)
                 assert(host == 'local' or host == 'remote')
                 set_only.add((host, snipet))
+                logger.debug('only: %s:%s' % (host, snipet))
+                
             elif spl[0] == 'ignore':
-                set_ignore.add(spl[1])
+                snipet = spl[1]
+                set_ignore.add(snipet)
+                logger.debug('ignore: %s' % snipet)
 
     SyncConf = collections.namedtuple('SyncConf', ('only', 'ignore'))
     return SyncConf(set_only, set_ignore)
@@ -111,17 +142,24 @@ def read_syncconf(path = '.sync.conf'):
 ## @param target Target of sync.
 ## @return Snipets to exclude from sync.
 def read_syncignore(target):
+    logger.info('read syncignore in %s' % target)
+    
     out = []
     paths = find_files(target, '.syncignore')
 
     for path in paths:
+        logger.debug('read %s:%s' % (target.host, path))
+        
         if target.is_local():
             ignored = run_command('cat "%s"' % path).split('\n')
         else:
             ignored = run_command('ssh %s cat "%s"' % (host, path)).split('\n')
             
         reldir = os.path.dirname(path)[len(target.path):].strip('/')
-        out += ['%s/%s' % (reldir, x.strip()) for x in ignored]
+        ignored = ['%s/%s' % (reldir, x.strip()) for x in ignored]
+        
+        out += ignored
+        logger.debug('ignore: [%s]' % ', '.join(ignored))
             
     return out
 
@@ -130,12 +168,18 @@ def read_syncignore(target):
 ## @param target Target instance.
 ## @param conf   Return value of read_syncconf().
 def clear(target, conf):
+    global opts
+    
+    logger.info('clear: %s)' % target)
+    
     removed = []
 
     # Enumerate files to remove
     for host, snipet in conf.only:
         if host != target.host:
             removed += ['"%s"' % x.strip() for x in find_files(target, snipet).split('\n')]
+
+    logger.debug('removed = %s' % str(removed))
 
     # Remove files
     if target.is_local():
@@ -150,6 +194,8 @@ def clear(target, conf):
 ## @param conf Return value of read_syncconf().
 def rsync(src, dest, conf):
     global opts
+
+    logger.info('rsync: %s -> %s)' % (src, dest))
     assert(src.is_local() or dest.is_local())
 
     ignored = read_syncignore(src) + list(conf.ignore)
@@ -157,6 +203,9 @@ def rsync(src, dest, conf):
     for host, snipet in conf.only:
         if host == src.host:
             ignored.append(snipet)
+            
+    logger.debug('ignored = %s' % str(ignored))
+    logger.debug('dry-run = %s' % opts.dry_run)
 
     cmd = ' '.join(
         ['rsync', '-ahvz', '--update'] +
@@ -176,6 +225,9 @@ def main():
 
     src = Target.str2target(opts.src)
     dests = [Target.str2target(d) for d in opts.dests]
+
+    logger.debug('src = %s' % (src))
+    logger.debug('dests = [%s]' % ', '.join(map(str, dests)))
 
     assert(src.is_local())
     assert(not any(Target.is_local, dests)) # dests are remotes
