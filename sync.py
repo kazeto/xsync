@@ -15,6 +15,10 @@ parser.add_argument('--coding', action='store', type=str, default='utf-8', help=
 opts = parser.parse_args()
 
 
+## Colors given string with ANSI color escape sequences.
+## @param code ANSI color code.
+## @param text String to color.
+## @param is_bold If true, makes the string bold.
 def ansi_color(code, text, is_bold=False):
     if is_bold:
         code = ('1;' + code)
@@ -30,6 +34,7 @@ ansi_silver = partial(ansi_color, '37')
 ansi_gray   = partial(ansi_color, '90')
 
 
+## Makes logger for this script.
 def make_logger(level):
     global opts
 
@@ -67,6 +72,8 @@ class Target:
     def is_local(self):
         return self.host == 'local'
 
+    ## Makes an instance of Target from given string.
+    ## @param s String in the format of `host:path`, such as "local:/home/xxx".
     @staticmethod
     def str2target(s):
         i = s.find(':')
